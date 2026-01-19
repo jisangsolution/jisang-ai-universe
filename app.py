@@ -49,11 +49,11 @@ from reportlab.lib.units import mm
 from dotenv import load_dotenv
 
 load_dotenv()
-api_key = os.getenv("GOOGLE_API_KEY")
+api_key = st.secrets.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
 if api_key: genai.configure(api_key=api_key)
 
 # --------------------------------------------------------------------------------
-# [Engine 1] PDF 생성기 (ReportLab)
+# [Engine 1] PDF 생성기
 # --------------------------------------------------------------------------------
 def generate_final_pdf(address, context):
     buffer = io.BytesIO()
@@ -67,7 +67,6 @@ def generate_final_pdf(address, context):
     else:
         font_name = 'Helvetica'
         
-    # Header & Title
     c.setFont(font_name, 10)
     c.drawRightString(width - 20*mm, height - 20*mm, "Jisang AI Enterprise Report")
     c.setStrokeColorRGB(0.2, 0.2, 0.6)
@@ -76,7 +75,6 @@ def generate_final_pdf(address, context):
     c.setFont(font_name, 22)
     c.drawCentredString(width / 2, height - 50*mm, "부동산 5대 영역 종합 분석 보고서")
     
-    # Body
     c.setFillColorRGB(0.96, 0.97, 0.99)
     c.rect(20*mm, height - 90*mm, width - 40*mm, 30*mm, fill=1, stroke=0)
     c.setFillColorRGB(0, 0, 0)
@@ -93,7 +91,7 @@ def generate_final_pdf(address, context):
     c.setFont(font_name, 11)
     facts = [
         f"💰 [금융] 연간 이자 절감 예상액: {context['finance_saving']:,} 원",
-        f"⚖️ [세무] 예상 취득세 (공장): {context['tax_est']:,} 원 ({context['tax_rate']}%)",
+        f"⚖️ [세무] 예상 취득세: {context['tax_est']:,} 원 ({context['tax_rate']}%)",
         f"🏗️ [개발] 신축 분양 예상 수익: {context['dev_profit']:,} 원 (ROI {context['dev_roi']}%)",
         f"🚨 [위험] 발견된 권리 리스크: {context['restrictions']}"
     ]
@@ -108,7 +106,6 @@ def generate_final_pdf(address, context):
     c.setFont(font_name, 11)
     c.drawString(25*mm, y_pos, "통합 대환 솔루션을 통해 금융 비용 절감 및 리스크 해소를 권장합니다.")
 
-    # PDF Footer Disclaimer
     c.setStrokeColorRGB(0.8, 0.8, 0.8)
     c.line(20*mm, 35*mm, width - 20*mm, 35*mm)
     c.setFont(font_name, 8)
@@ -160,22 +157,44 @@ st.set_page_config(page_title="Jisang AI Universe", page_icon="🌌", layout="wi
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/2040/2040504.png", width=60)
     st.title("🌌 Jisang Universe")
-    st.markdown("### 📍 분석 대상")
-    addr_input = st.text_input("주소 입력", "김포시 통진읍 도사리 163-1")
-    if st.button("🚀 분석 실행", type="primary", use_container_width=True):
-        st.session_state['current_addr'] = addr_input
-        st.session_state.uni_chat = [{"role": "assistant", "content": f"안녕하세요! **'{addr_input}'** 전담 AI입니다."}]
+    st.markdown("### 📍 분석 대상 (다중 필지)")
+    
+    # [수정] Text Area로 변경하여 여러 줄 입력 지원
+    default_addrs = "김포시 통진읍 도사리 163-1\n서울시 강남구 역삼동 825-1\n부산시 해운대구 우동 1408"
+    addr_input = st.text_area("주소를 입력하세요 (줄바꿈으로 구분)", default_addrs, height=150)
+    
+    if st.button("🚀 일괄 분석 실행", type="primary", use_container_width=True):
+        # 줄바꿈으로 주소 분리 및 공백 제거
+        addr_list = [a.strip() for a in addr_input.split('\n') if a.strip()]
+        st.session_state['addr_list'] = addr_list
+        st.session_state['current_addr'] = addr_list[0] if addr_list else ""
+        st.session_state.uni_chat = [{"role": "assistant", "content": f"안녕하세요! 총 **{len(addr_list)}개 필지**에 대한 분석 준비가 완료되었습니다."}]
+        st.toast(f"{len(addr_list)}개 필지 데이터 로드 완료")
 
-if 'current_addr' not in st.session_state: st.session_state['current_addr'] = "김포시 통진읍 도사리 163-1"
+# 초기값 설정
+if 'addr_list' not in st.session_state:
+    st.session_state['addr_list'] = ["김포시 통진읍 도사리 163-1"]
+if 'current_addr' not in st.session_state:
+    st.session_state['current_addr'] = st.session_state['addr_list'][0]
 
-# Data
-price, debt = 850000000, 600000000
+# [수정] 분석 대상 선택 박스 (필지가 여러 개일 때만 활성화)
+if len(st.session_state['addr_list']) > 1:
+    selected_addr = st.selectbox("🔍 상세 분석할 필지를 선택하세요:", st.session_state['addr_list'])
+    st.session_state['current_addr'] = selected_addr
+else:
+    st.session_state['current_addr'] = st.session_state['addr_list'][0]
+
+# Data Generation (Simulation based on address hash for variety)
+current = st.session_state['current_addr']
+seed = len(current) 
+price = 850000000 + (seed * 10000000)
+debt = int(price * 0.7)
 saving = DomainExpert.calc_finance(debt)
 tax, tax_rate = DomainExpert.calc_tax(price)
 profit, roi = DomainExpert.calc_development(price, 363)
-ctx = {"finance_saving": saving, "tax_est": tax, "tax_rate": tax_rate, "dev_profit": profit, "dev_roi": roi, "restrictions": "신탁등기, 압류"}
+ctx = {"finance_saving": saving, "tax_est": tax, "tax_rate": tax_rate, "dev_profit": profit, "dev_roi": roi, "restrictions": "신탁등기, 압류" if seed % 2 == 0 else "근저당권설정"}
 
-# Layout
+# Main Layout
 st.title(f"🏢 {st.session_state['current_addr']} 종합 분석")
 tab1, tab2, tab3 = st.tabs(["📊 통합 대시보드", "💬 AI 컨시어지", "📂 B2B 포트폴리오"])
 
@@ -187,7 +206,12 @@ with tab1:
     
     st.markdown("---")
     c_risk, c_sol = st.columns([1, 2])
-    with c_risk: st.error(f"🔴 권리 위험: {ctx['restrictions']}")
+    with c_risk: 
+        if "신탁" in ctx['restrictions']:
+            st.error(f"🔴 권리 위험: {ctx['restrictions']}")
+        else:
+            st.warning(f"🟡 권리 참고: {ctx['restrictions']}")
+            
     with c_sol: 
         st.success("**✅ 지상 AI 통합 솔루션**")
         st.write("- **금융**: 대환 실행\n- **세무**: 중과세 검토\n- **개발**: 공장 증축")
@@ -199,14 +223,9 @@ with tab1:
         st.download_button("📄 한글 정밀 보고서 (.pdf)", pdf_bytes, "Jisang_Final_Report.pdf", "application/pdf", type="primary")
     except Exception as e: st.error(f"PDF 오류: {e}")
 
-    # ★ [추가됨] 웹 대시보드 하단 면책 조항
     st.markdown("---")
     with st.expander("⚖️ 법적 고지 및 면책 조항 (Disclaimer)", expanded=False):
-        st.caption("""
-        1. **정보의 참고성**: 본 서비스에서 제공하는 모든 분석 결과(금융, 세무, 개발 등)는 AI 알고리즘 및 공공 데이터를 기반으로 추산된 시뮬레이션 결과이며, 법적 효력이 없습니다.
-        2. **변동 가능성**: 실제 대출 금리, 한도, 세금, 인허가 여부는 금융사의 심사 및 관할 관청의 최종 결정에 따라 달라질 수 있습니다.
-        3. **책임의 한계**: 본 서비스의 분석 내용을 근거로 한 투자, 계약, 법률 행위에 대한 최종 책임은 사용자 본인에게 있으며, (주)지상 AI는 이에 대한 어떠한 법적 책임도 지지 않습니다.
-        """)
+        st.caption("1. 본 보고서는 시뮬레이션 결과이며 법적 효력이 없습니다. 2. 투자 책임은 본인에게 있습니다.")
 
 with tab2:
     st.subheader("💬 AI 부동산 비서")
@@ -221,7 +240,18 @@ with tab2:
         with st.chat_message("assistant"): st.markdown(reply)
 
 with tab3:
-    st.subheader("💼 포트폴리오 (B2B)")
-    df = pd.DataFrame({"주소": [st.session_state['current_addr'], "강남구"], "평가액": ["8.5억", "25억"]})
+    st.subheader("💼 전체 포트폴리오 요약 (B2B)")
+    st.info(f"총 {len(st.session_state['addr_list'])}개 필지에 대한 일괄 분석 결과입니다.")
+    
+    # [수정] 입력된 모든 주소를 기반으로 테이블 생성
+    portfolio_data = []
+    for addr in st.session_state['addr_list']:
+        # Mock Data Logic
+        s = len(addr)
+        p = 850000000 + (s * 5000000)
+        risk = "High" if s % 2 == 0 else "Medium"
+        portfolio_data.append({"주소": addr, "평가액": f"{p/100000000:.1f}억", "리스크 등급": risk})
+        
+    df = pd.DataFrame(portfolio_data)
     st.dataframe(df, use_container_width=True)
-    st.download_button("📥 엑셀 다운로드", df.to_csv().encode('utf-8'), "portfolio.csv")
+    st.download_button("📥 전체 분석 결과 다운로드 (.csv)", df.to_csv().encode('utf-8'), "portfolio.csv")
