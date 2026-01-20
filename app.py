@@ -2,27 +2,26 @@ import os
 import sys
 import subprocess
 import urllib.request
-import pandas as pd
-from datetime import datetime
 import io
+import requests
+import xml.etree.ElementTree as ET
+from datetime import datetime
+import pandas as pd
 
-# [Step 0] 스마트 런처
+# [Step 0] 스마트 런처 (라이브러리 자동 점검)
 def setup_environment():
     required = {
         "streamlit": "streamlit", 
         "plotly": "plotly", 
         "google-generativeai": "google.generativeai", 
         "python-dotenv": "dotenv", 
-        "reportlab": "reportlab" 
+        "reportlab": "reportlab",
+        "requests": "requests"
     }
     needs_install = []
-    
     for pkg, mod in required.items():
-        try:
-            __import__(mod)
-        except ImportError:
-            needs_install.append(pkg)
-    
+        try: __import__(mod)
+        except ImportError: needs_install.append(pkg)
     if needs_install:
         subprocess.check_call([sys.executable, "-m", "pip", "install", "-U"] + needs_install)
         os.execv(sys.executable, [sys.executable, "-m", "streamlit", "run", __file__])
@@ -46,212 +45,122 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
-from dotenv import load_dotenv
 
-load_dotenv()
-api_key = st.secrets.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
+# API Keys Load (Secrets)
+api_key = st.secrets.get("GOOGLE_API_KEY")
+data_go_key = st.secrets.get("DATA_GO_KR_KEY")
+kakao_key = st.secrets.get("KAKAO_API_KEY")
+
 if api_key: genai.configure(api_key=api_key)
 
 # --------------------------------------------------------------------------------
-# [Engine 1] PDF 생성기
+# [Engine 1] Kakao Geocoding (주소 -> 행정코드 & 좌표 변환)
+# --------------------------------------------------------------------------------
+def get_codes_from_kakao(address):
+    if not kakao_key:
+        return None, None, None, None, None, "카카오 API 키 미설정"
+    
+    url = "https://dapi.kakao.com/v2/local/search/address.json"
+    headers = {"Authorization": f"KakaoAK {kakao_key}"}
+    params = {"query": address}
+    
+    try:
+        resp = requests.get(url, headers=headers, params=params, timeout=5)
+        if resp.status_code == 200:
+            docs = resp.json().get('documents')
+            if docs:
+                # 좌표 (지도 표시용)
+                lat = float(docs[0]['y'])
+                lon = float(docs[0]['x'])
+                
+                # 행정코드 파싱
+                b_code = docs[0]['address']['b_code']
+                sigungu_cd = b_code[:5]
+                bjdong_cd = b_code[5:]
+                
+                # 지번 파싱 (4자리 패딩 필수)
+                main_no = docs[0]['address']['main_address_no']
+                sub_no = docs[0]['address']['sub_address_no']
+                bun = main_no.zfill(4)
+                ji = sub_no.zfill(4) if sub_no else "0000"
+                
+                return sigungu_cd, bjdong_cd, bun, ji, (lat, lon), "Success"
+            else:
+                return None, None, None, None, None, "주소를 찾을 수 없습니다. (도로명/지번 확인)"
+        else:
+            return None, None, None, None, None, f"카카오 API 오류 ({resp.status_code})"
+    except Exception as e:
+        return None, None, None, None, None, f"통신 실패: {str(e)}"
+
+# --------------------------------------------------------------------------------
+# [Engine 2] Real Data Connector (공공데이터포털)
+# --------------------------------------------------------------------------------
+class RealDataConnector:
+    def __init__(self, service_key):
+        self.service_key = service_key
+        self.base_url = "http://apis.data.go.kr/1613000/BldRgstService_v2/getBrTitleInfo"
+
+    def get_building_info(self, sigungu_cd, bjdong_cd, bun, ji):
+        if not self.service_key: return {"status": "error", "msg": "공공데이터 키 미설정"}
+        
+        params = {
+            "serviceKey": self.service_key,
+            "sigunguCd": sigungu_cd,
+            "bjdongCd": bjdong_cd,
+            "bun": bun,
+            "ji": ji,
+            "numOfRows": 1,
+            "pageNo": 1
+        }
+        try:
+            response = requests.get(self.base_url, params=params, timeout=10)
+            if response.status_code == 200:
+                try:
+                    root = ET.fromstring(response.content)
+                    item = root.find('.//item')
+                    if item is not None:
+                        return {
+                            "status": "success",
+                            "주용도": item.findtext("mainPurpsCdNm") or "-",
+                            "연면적": item.findtext("totArea") or "0",
+                            "사용승인일": item.findtext("useAprDay") or "-",
+                            "구조": item.findtext("strctCdNm") or "-",
+                            "높이": item.findtext("heit") or "0",
+                            "위반여부": "위반" if item.findtext("otherConst") else "정상"
+                        }
+                    else: return {"status": "nodata", "msg": "건축물대장이 존재하지 않습니다. (나대지 등)"}
+                except: return {"status": "error", "msg": "XML 파싱 오류"}
+            else: return {"status": "error", "msg": f"정부 서버 오류 {response.status_code}"}
+        except Exception as e: return {"status": "error", "msg": str(e)}
+
+# --------------------------------------------------------------------------------
+# [Engine 3] PDF Generator
 # --------------------------------------------------------------------------------
 def generate_final_pdf(address, context):
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
     width, height = A4
-    
     font_path = "NanumGothic.ttf"
-    if os.path.exists(font_path):
-        pdfmetrics.registerFont(TTFont('NanumGothic', font_path))
-        font_name = 'NanumGothic'
-    else:
-        font_name = 'Helvetica'
-        
-    c.setFont(font_name, 10)
-    c.drawRightString(width - 20*mm, height - 20*mm, "Jisang AI Enterprise Report")
-    c.setStrokeColorRGB(0.2, 0.2, 0.6)
-    c.line(20*mm, height - 22*mm, width - 20*mm, height - 22*mm)
+    font_name = 'NanumGothic' if os.path.exists(font_path) else 'Helvetica'
+    if os.path.exists(font_path): pdfmetrics.registerFont(TTFont(font_name, font_path))
     
-    c.setFont(font_name, 22)
-    c.drawCentredString(width / 2, height - 50*mm, "부동산 5대 영역 종합 분석 보고서")
+    # Header
+    c.setFont(font_name, 24)
+    c.drawCentredString(width/2, height-40*mm, "Jisang AI 부동산 정밀 분석 보고서")
     
-    c.setFillColorRGB(0.96, 0.97, 0.99)
-    c.rect(20*mm, height - 90*mm, width - 40*mm, 30*mm, fill=1, stroke=0)
-    c.setFillColorRGB(0, 0, 0)
-    
+    c.setStrokeColorRGB(0.2, 0.2, 0.8)
+    c.line(20*mm, height-45*mm, width-20*mm, height-45*mm)
+
+    # Body
     c.setFont(font_name, 12)
-    c.drawString(25*mm, height - 70*mm, f"• 분석 대상: {address}")
-    c.drawString(25*mm, height - 80*mm, f"• 발행 일자: {datetime.now().strftime('%Y년 %m월 %d일')}")
+    y = height - 70*mm
+    c.drawString(25*mm, y, f"• 분석 주소: {address}")
+    c.drawString(25*mm, y-10*mm, f"• 분석 일시: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     
-    y_pos = height - 110*mm
+    y -= 30*mm
     c.setFont(font_name, 16)
-    c.drawString(20*mm, y_pos, "1. 핵심 분석 결과 (Summary)")
-    y_pos -= 10*mm
+    c.drawString(25*mm, y, "[핵심 데이터]")
+    c.setFont(font_name, 12)
     
-    c.setFont(font_name, 11)
-    facts = [
-        f"💰 [금융] 연간 이자 절감 예상액: {context['finance_saving']:,} 원",
-        f"⚖️ [세무] 예상 취득세: {context['tax_est']:,} 원 ({context['tax_rate']}%)",
-        f"🏗️ [개발] 신축 분양 예상 수익: {context['dev_profit']:,} 원 (ROI {context['dev_roi']}%)",
-        f"🚨 [위험] 발견된 권리 리스크: {context['restrictions']}"
-    ]
-    for fact in facts:
-        c.drawString(25*mm, y_pos, fact)
-        y_pos -= 8*mm
-        
-    y_pos -= 10*mm
-    c.setFont(font_name, 16)
-    c.drawString(20*mm, y_pos, "2. AI 심층 솔루션 제언")
-    y_pos -= 8*mm
-    c.setFont(font_name, 11)
-    c.drawString(25*mm, y_pos, "통합 대환 솔루션을 통해 금융 비용 절감 및 리스크 해소를 권장합니다.")
-
-    c.setStrokeColorRGB(0.8, 0.8, 0.8)
-    c.line(20*mm, 35*mm, width - 20*mm, 35*mm)
-    c.setFont(font_name, 8)
-    c.setFillColorRGB(0.4, 0.4, 0.4)
-    
-    footer_lines = [
-        "[면책 조항] 본 보고서는 참고 자료이며 법적 효력이 없습니다.",
-        "제시된 수치는 시뮬레이션 결과로 실제와 다를 수 있으며, 투자 책임은 본인에게 있습니다."
-    ]
-    fy = 30*mm
-    for l in footer_lines:
-        c.drawCentredString(width/2, fy, l)
-        fy -= 4*mm
-    
-    c.showPage()
-    c.save()
-    buffer.seek(0)
-    return buffer
-
-# --------------------------------------------------------------------------------
-# [Engine 2] 도메인 계산기
-# --------------------------------------------------------------------------------
-class DomainExpert:
-    @staticmethod
-    def calc_finance(debt): return int(debt * 0.10)
-    @staticmethod
-    def calc_tax(price): return int(price * 0.046), 4.6
-    @staticmethod
-    def calc_development(price, size): 
-        cost, rev = size * 5000000, size * 10000000
-        profit = rev - cost - price
-        return int(profit), round((profit/(price+cost))*100, 2)
-
-# --------------------------------------------------------------------------------
-# [Chatbot] 응답 로직
-# --------------------------------------------------------------------------------
-def get_universe_response(u_in, ctx):
-    u_in = u_in.lower()
-    if any(k in u_in for k in ["안내", "도와줘"]): return "1. 금융\n2. 세무\n3. 개발\n4. 권리"
-    if any(k in u_in for k in ["금융", "이자"]): return f"💰 연간 **{ctx['finance_saving']:,}원** 절감 가능합니다."
-    if any(k in u_in for k in ["세금", "취득"]): return f"⚖️ 예상 취득세: **{ctx['tax_est']:,}원**"
-    return "죄송합니다. '안내해줘'라고 입력하세요."
-
-# --------------------------------------------------------------------------------
-# [UI] Dashboard
-# --------------------------------------------------------------------------------
-st.set_page_config(page_title="Jisang AI Universe", page_icon="🌌", layout="wide")
-
-with st.sidebar:
-    st.image("https://cdn-icons-png.flaticon.com/512/2040/2040504.png", width=60)
-    st.title("🌌 Jisang Universe")
-    st.markdown("### 📍 분석 대상 (다중 필지)")
-    
-    # [수정] Text Area로 변경하여 여러 줄 입력 지원
-    default_addrs = "김포시 통진읍 도사리 163-1\n서울시 강남구 역삼동 825-1\n부산시 해운대구 우동 1408"
-    addr_input = st.text_area("주소를 입력하세요 (줄바꿈으로 구분)", default_addrs, height=150)
-    
-    if st.button("🚀 일괄 분석 실행", type="primary", use_container_width=True):
-        # 줄바꿈으로 주소 분리 및 공백 제거
-        addr_list = [a.strip() for a in addr_input.split('\n') if a.strip()]
-        st.session_state['addr_list'] = addr_list
-        st.session_state['current_addr'] = addr_list[0] if addr_list else ""
-        st.session_state.uni_chat = [{"role": "assistant", "content": f"안녕하세요! 총 **{len(addr_list)}개 필지**에 대한 분석 준비가 완료되었습니다."}]
-        st.toast(f"{len(addr_list)}개 필지 데이터 로드 완료")
-
-# 초기값 설정
-if 'addr_list' not in st.session_state:
-    st.session_state['addr_list'] = ["김포시 통진읍 도사리 163-1"]
-if 'current_addr' not in st.session_state:
-    st.session_state['current_addr'] = st.session_state['addr_list'][0]
-
-# [수정] 분석 대상 선택 박스 (필지가 여러 개일 때만 활성화)
-if len(st.session_state['addr_list']) > 1:
-    selected_addr = st.selectbox("🔍 상세 분석할 필지를 선택하세요:", st.session_state['addr_list'])
-    st.session_state['current_addr'] = selected_addr
-else:
-    st.session_state['current_addr'] = st.session_state['addr_list'][0]
-
-# Data Generation (Simulation based on address hash for variety)
-current = st.session_state['current_addr']
-seed = len(current) 
-price = 850000000 + (seed * 10000000)
-debt = int(price * 0.7)
-saving = DomainExpert.calc_finance(debt)
-tax, tax_rate = DomainExpert.calc_tax(price)
-profit, roi = DomainExpert.calc_development(price, 363)
-ctx = {"finance_saving": saving, "tax_est": tax, "tax_rate": tax_rate, "dev_profit": profit, "dev_roi": roi, "restrictions": "신탁등기, 압류" if seed % 2 == 0 else "근저당권설정"}
-
-# Main Layout
-st.title(f"🏢 {st.session_state['current_addr']} 종합 분석")
-tab1, tab2, tab3 = st.tabs(["📊 통합 대시보드", "💬 AI 컨시어지", "📂 B2B 포트폴리오"])
-
-with tab1:
-    c1, c2, c3 = st.columns(3)
-    c1.metric("💰 금융 (이자절감)", f"{saving/10000:,.0f}만 원/년")
-    c2.metric("⚖️ 세무 (예상취득세)", f"{tax/10000:,.0f}만 원")
-    c3.metric("🏗️ 개발 (예상수익)", f"{profit/10000:,.0f}만 원")
-    
-    st.markdown("---")
-    c_risk, c_sol = st.columns([1, 2])
-    with c_risk: 
-        if "신탁" in ctx['restrictions']:
-            st.error(f"🔴 권리 위험: {ctx['restrictions']}")
-        else:
-            st.warning(f"🟡 권리 참고: {ctx['restrictions']}")
-            
-    with c_sol: 
-        st.success("**✅ 지상 AI 통합 솔루션**")
-        st.write("- **금융**: 대환 실행\n- **세무**: 중과세 검토\n- **개발**: 공장 증축")
-
-    st.markdown("---")
-    st.subheader("📑 보고서 다운로드")
-    try:
-        pdf_bytes = generate_final_pdf(st.session_state['current_addr'], ctx)
-        st.download_button("📄 한글 정밀 보고서 (.pdf)", pdf_bytes, "Jisang_Final_Report.pdf", "application/pdf", type="primary")
-    except Exception as e: st.error(f"PDF 오류: {e}")
-
-    st.markdown("---")
-    with st.expander("⚖️ 법적 고지 및 면책 조항 (Disclaimer)", expanded=False):
-        st.caption("1. 본 보고서는 시뮬레이션 결과이며 법적 효력이 없습니다. 2. 투자 책임은 본인에게 있습니다.")
-
-with tab2:
-    st.subheader("💬 AI 부동산 비서")
-    if "uni_chat" not in st.session_state: st.session_state.uni_chat = [{"role": "assistant", "content": "안녕하세요!"}]
-    for msg in st.session_state.uni_chat:
-        with st.chat_message(msg["role"]): st.markdown(msg["content"])
-    if prompt := st.chat_input("질문 입력"):
-        st.session_state.uni_chat.append({"role": "user", "content": prompt})
-        with st.chat_message("user"): st.write(prompt)
-        reply = get_universe_response(prompt, ctx)
-        st.session_state.uni_chat.append({"role": "assistant", "content": reply})
-        with st.chat_message("assistant"): st.markdown(reply)
-
-with tab3:
-    st.subheader("💼 전체 포트폴리오 요약 (B2B)")
-    st.info(f"총 {len(st.session_state['addr_list'])}개 필지에 대한 일괄 분석 결과입니다.")
-    
-    # [수정] 입력된 모든 주소를 기반으로 테이블 생성
-    portfolio_data = []
-    for addr in st.session_state['addr_list']:
-        # Mock Data Logic
-        s = len(addr)
-        p = 850000000 + (s * 5000000)
-        risk = "High" if s % 2 == 0 else "Medium"
-        portfolio_data.append({"주소": addr, "평가액": f"{p/100000000:.1f}억", "리스크 등급": risk})
-        
-    df = pd.DataFrame(portfolio_data)
-    st.dataframe(df, use_container_width=True)
-    st.download_button("📥 전체 분석 결과 다운로드 (.csv)", df.to_csv().encode('utf-8'), "portfolio.csv")
+    data_lines = [
+        f"1. 건물 용도: {context.
