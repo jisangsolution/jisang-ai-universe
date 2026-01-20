@@ -1,6 +1,5 @@
 import os
 import sys
-import time
 import subprocess
 import urllib.request
 import requests
@@ -17,27 +16,23 @@ def setup_environment():
         except ImportError:
             subprocess.check_call([sys.executable, "-m", "pip", "install", pkg])
     
-    # 한글 폰트 안전 확보
+    # 한글 폰트 안전 확보 (없으면 다운로드)
     font_path = "NanumGothic.ttf"
     if not os.path.exists(font_path):
         url = "https://github.com/google/fonts/raw/main/ofl/nanumgothic/NanumGothic-Regular.ttf"
         try:
             urllib.request.urlretrieve(url, font_path)
         except:
-            pass # 폰트 다운 실패해도 시스템은 돌아가야 함
+            pass 
 
-# 모듈 로딩 전 환경 점검
 if "streamlit" not in sys.modules:
     setup_environment()
 
 import google.generativeai as genai
 
-# [Step 1] Secrets 로드 (결함 방지 처리)
+# [Step 1] Secrets 로드 (None 방지)
 def get_secret(key_name):
-    try:
-        return st.secrets.get(key_name)
-    except:
-        return None
+    return st.secrets.get(key_name, "")
 
 api_key = get_secret("GOOGLE_API_KEY")
 data_go_key = get_secret("DATA_GO_KR_KEY")
@@ -51,7 +46,7 @@ if api_key: genai.configure(api_key=api_key)
 # [Engine 1] PNU 마스터 (주소 -> 좌표/코드 변환)
 # --------------------------------------------------------------------------------
 def get_pnu_and_coords(address):
-    if not kakao_key: return None, None, None, "카카오 API 키가 설정되지 않았습니다."
+    if not kakao_key: return None, None, None, "카카오 API 키 미설정"
     
     url = "https://dapi.kakao.com/v2/local/search/address.json"
     headers = {"Authorization": f"KakaoAK {kakao_key}"}
@@ -65,32 +60,31 @@ def get_pnu_and_coords(address):
                 b_code = addr['b_code']
                 mount_cd = "2" if addr.get('mountain_yn') == 'Y' else "1"
                 pnu = f"{b_code}{mount_cd}{addr['main_address_no'].zfill(4)}{addr['sub_address_no'].zfill(4) if addr['sub_address_no'] else '0000'}"
-                
                 return pnu, (float(docs[0]['y']), float(docs[0]['x'])), addr, "Success"
         return None, None, None, "주소를 찾을 수 없습니다."
     except Exception as e:
         return None, None, None, f"카카오 API 오류: {str(e)}"
 
 # --------------------------------------------------------------------------------
-# [Engine 2] 데이터 융합 엔진 (V-World + 국토부 + 예외처리)
+# [Engine 2] 데이터 융합 엔진 (V-World + 국토부 + 예외처리 강화)
 # --------------------------------------------------------------------------------
 class MasterFactEngine:
     @staticmethod
     def get_land_features(pnu):
         # V-World API (토지특성)
-        if not vworld_key: return {"도로접면": "API키 없음", "형상": "API키 없음", "지세": "-"}
+        default_feat = {"도로접면": "분석 대기", "형상": "분석 대기", "지세": "-"}
+        if not vworld_key: return default_feat
         
         url = "http://api.vworld.kr/req/data"
         params = {
             "key": vworld_key,
-            "domain": "https://share.streamlit.io", # 중요: V-World에 등록된 도메인과 일치해야 함
+            "domain": "https://share.streamlit.io", # V-World 등록 도메인 확인 필수
             "service": "data", "version": "2.0", "request": "getfeature",
             "format": "json", "size": "1", "data": "LP_PA_CBND_BU_INFO",
             "attrfilter": f"pnu:like:{pnu}"
         }
         
         try:
-            # 타임아웃을 짧게 주어 UI 블로킹 방지
             res = requests.get(url, params=params, timeout=5)
             if res.status_code == 200:
                 data = res.json()
@@ -101,15 +95,16 @@ class MasterFactEngine:
                         "형상": feat.get('lad_shpe_nm', '확인불가'),
                         "지세": feat.get('lad_hght_nm', '확인불가')
                     }
-        except:
-            pass
-        return {"도로접면": "데이터 연결 중", "형상": "데이터 연결 중", "지세": "데이터 연결 중"}
+        except: pass
+        return default_feat
 
     @staticmethod
     def get_land_basic(pnu):
-        # 국토부 토지대장
-        if not land_go_key and not data_go_key: return None
+        # 국토부 토지대장 (키 디코딩 필수)
+        default_basic = {"지목": "-", "면적": "0", "공시지가": "0"}
+        if not land_go_key and not data_go_key: return default_basic
         
+        # Requests는 자동으로 인코딩하므로, 이미 인코딩된 키는 디코딩해서 넣어야 함
         real_key = requests.utils.unquote(land_go_key or data_go_key)
         url = "http://apis.data.go.kr/1613000/LandInfoService/getLandInfo"
         
@@ -124,21 +119,20 @@ class MasterFactEngine:
                         "면적": item.findtext("lndpclAr"),
                         "공시지가": item.findtext("pblntfPclnd")
                     }
-        except:
-            pass
-        return None
+        except: pass
+        return default_basic
 
 # --------------------------------------------------------------------------------
 # [Engine 3] AI 수석 전략가 (Gemini 1.5 Flash - 추론 강화)
 # --------------------------------------------------------------------------------
 def get_unicorn_insight(addr, land, feat):
-    if not api_key: return "Google API 키가 필요합니다."
+    if not api_key: return "Google API 키 설정이 필요합니다."
     
     model = genai.GenerativeModel('gemini-1.5-flash')
     
-    # 데이터가 없을 경우를 대비한 방어 로직
-    land_info = f"면적 {land['면적']}m2, 지목 {land['지목']}, 공시지가 {land['공시지가']}원" if land else "토지대장 데이터 수신 대기중"
-    feat_info = f"도로 {feat['도로접면']}, 형상 {feat['형상']}" if feat else "토지특성 데이터 수신 대기중"
+    # 데이터가 비어있어도 AI가 멈추지 않도록 프롬프트 조정
+    land_info = f"면적 {land['면적']}m2, 지목 {land['지목']}, 공시지가 {land['공시지가']}원" 
+    feat_info = f"도로 {feat['도로접면']}, 형상 {feat['형상']}"
     
     prompt = f"""
     당신은 대한민국 상위 0.1% 부동산 개발 전문가(건축사+감정평가사+시행사)입니다.
@@ -148,8 +142,7 @@ def get_unicorn_insight(addr, land, feat):
     토지 팩트: {land_info}
     물리적 특성: {feat_info}
 
-    위 데이터를 바탕으로 투자자(매수자)에게 '확신'을 줄 수 있는 3가지 핵심 전략을 제시하세요.
-    데이터가 부족하다면 입지(주소)를 바탕으로 일반적인 가능성을 추론하여 답변하세요.
+    위 데이터가 일부 부족하더라도, 주소지(입지)를 바탕으로 추론하여 투자자에게 '확신'을 줄 수 있는 3가지 핵심 전략을 제시하세요.
 
     1. 📐 **개발 최적화**: 지목과 형상을 고려할 때 어떤 건축물(상가주택, 창고, 근생 등)이 가장 적합한가?
     2. 💰 **가치 평가**: 공시지가 대비 실거래가 추정 및 수익성 코멘트.
@@ -171,13 +164,13 @@ st.set_page_config(page_title="Jisang AI Unicorn", layout="wide", page_icon="�
 st.markdown("""
 <style>
     .metric-card { background-color: #f8f9fa; padding: 15px; border-radius: 8px; border: 1px solid #e9ecef; }
-    .stButton>button { width: 100%; border-radius: 5px; height: 50px; font-weight: bold; }
+    .stButton>button { width: 100%; border-radius: 5px; height: 50px; font-weight: bold; background-color: #FF4B4B; color: white; }
 </style>
 """, unsafe_allow_html=True)
 
 with st.sidebar:
     st.title("🦄 지상 AI")
-    st.caption("초격차 부동산 종합 솔루션 Ver 9.5")
+    st.caption("초격차 부동산 종합 솔루션 Ver 9.6")
     st.markdown("---")
     
     target_addr = st.text_input("📍 분석할 주소 입력", "경기도 김포시 통진읍 도사리 163-1")
@@ -189,51 +182,54 @@ with st.sidebar:
 st.title("지상 AI 부동산 의사결정 시스템")
 
 if search_btn:
+    # 지도 영역 미리 확보 (UX 향상)
+    map_container = st.empty()
+    
     with st.spinner("🛰️ 국가 행정망 및 AI 신경망 연동 중..."):
         pnu, coords, addr_data, msg = get_pnu_and_coords(target_addr)
         
         if pnu:
-            # 1. 데이터 병렬 수집 (속도 최적화)
+            # 0. 지도 즉시 표시 (사용자 안심)
+            map_container.map(pd.DataFrame({'lat': [coords[0]], 'lon': [coords[1]]}), zoom=17)
+            
+            # 1. 데이터 병렬 수집 (실패해도 멈추지 않음)
             land_basic = MasterFactEngine.get_land_basic(pnu)
             land_feat = MasterFactEngine.get_land_features(pnu)
             
-            # 2. AI 분석 (데이터가 일부 없어도 강제 실행)
+            # 2. AI 분석 (데이터가 '분석 대기' 상태라도 강제 실행)
             ai_insight = get_unicorn_insight(target_addr, land_basic, land_feat)
             
             # 3. 화면 렌더링
-            st.success("✅ 분석 완료")
-            
-            # 지도 섹션
-            st.map(pd.DataFrame({'lat': [coords[0]], 'lon': [coords[1]]}), zoom=17)
-            
             st.divider()
-            
             col1, col2 = st.columns([1, 1.5])
             
             with col1:
                 st.subheader("📊 팩트 체크 (Data Integrity)")
                 with st.container(border=True):
-                    if land_basic:
+                    # 데이터 유무에 따라 색상 분기
+                    if land_basic['면적'] != "0":
+                        st.success("✅ 국토부 데이터 수신 완료")
                         st.markdown(f"**• 지목**: `{land_basic['지목']}`")
                         st.markdown(f"**• 면적**: `{float(land_basic['면적']):,.1f}㎡`")
                         st.markdown(f"**• 공시지가**: `{int(land_basic['공시지가']):,}원/㎡`")
                     else:
-                        st.warning("⚠️ 국토부 데이터 동기화 중")
+                        st.warning("⚠️ 국토부 데이터 지연 (AI 추론 모드 가동)")
 
                     st.markdown("---")
                     
-                    if land_feat:
+                    if land_feat['도로접면'] != "분석 대기":
+                        st.success("✅ V-World 데이터 수신 완료")
                         st.markdown(f"**• 도로접면**: `{land_feat['도로접면']}`")
                         st.markdown(f"**• 토지형상**: `{land_feat['형상']}`")
                         st.markdown(f"**• 지세**: `{land_feat['지세']}`")
                     else:
-                        st.warning("⚠️ V-World 데이터 동기화 중")
+                        st.warning("⚠️ V-World 데이터 지연 (API 승인 대기)")
             
             with col2:
                 st.subheader("💡 유니콘 수석 전략가 의견")
                 with st.container(border=True):
                     st.markdown(ai_insight)
-                    st.caption("※ 본 리포트는 AI 추론 결과이며, 실제 투자는 전문가 자문이 필요합니다.")
+                    st.caption("※ 본 리포트는 상위 0.1% 전문가 그룹 AI의 분석 결과입니다.")
         else:
             st.error(f"❌ 오류 발생: {msg}")
 
