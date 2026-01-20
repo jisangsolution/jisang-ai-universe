@@ -219,42 +219,4 @@ if st.session_state.get('run'):
             st.divider()
             
             # 결과 화면
-            c1, c2 = st.columns([1, 1.5])
-            
-            with c1:
-                st.subheader("📊 데이터 무결성 체크")
-                
-                # 토지대장 결과 표시
-                if land_res.get('status') == 'SUCCESS':
-                    st.markdown(f"""<div class="success-box">
-                    <b>✅ 국토부 데이터 수신 성공</b><br>
-                    • 지목: {land_res['지목']}<br>
-                    • 면적: {float(land_res['면적']):,.1f}㎡<br>
-                    • 공시지가: {int(land_res['공시지가']):,}원
-                    </div>""", unsafe_allow_html=True)
-                else:
-                    st.markdown(f"""<div class="metric-box">
-                    <b>⚠️ 국토부 데이터 수신 실패</b><br>
-                    원인: {land_res.get('msg')}<br>
-                    <small>※ API 키 디코딩 또는 승인 상태 확인 필요</small>
-                    </div>""", unsafe_allow_html=True)
-
-                st.markdown("<br>", unsafe_allow_html=True)
-                
-                # 토지특성 결과 표시
-                if feat_res['도로'] != "확인중":
-                    st.markdown(f"""<div class="success-box">
-                    <b>✅ V-World 데이터 수신 성공</b><br>
-                    • 도로: {feat_res['도로']}<br>
-                    • 형상: {feat_res['형상']}<br>
-                    • 지세: {feat_res['지세']}
-                    </div>""", unsafe_allow_html=True)
-                else:
-                    st.info("ℹ️ 토지 특성 데이터 로딩 중 (V-World)")
-
-            with c2:
-                st.subheader("💡 유니콘 수석 전략가 의견")
-                st.info(ai_text)
-                
-        else:
-            st.error(f"주소 오류: {msg}")
+            c1, c2 = st.columns([1, 1
