@@ -46,7 +46,7 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 
-# API Keys
+# API Keys Load
 api_key = st.secrets.get("GOOGLE_API_KEY")
 data_go_key = st.secrets.get("DATA_GO_KR_KEY")
 kakao_key = st.secrets.get("KAKAO_API_KEY")
@@ -54,11 +54,10 @@ kakao_key = st.secrets.get("KAKAO_API_KEY")
 if api_key: genai.configure(api_key=api_key)
 
 # --------------------------------------------------------------------------------
-# [Engine 1] Kakao Geocoding
+# [Engine 1] Kakao Geocoding & Context
 # --------------------------------------------------------------------------------
 def get_codes_from_kakao(address):
-    if not kakao_key:
-        return None, None, None, None, None, "카카오 API 키 미설정"
+    if not kakao_key: return None, None, None, None, None, None, "API Key Missing"
     
     url = "https://dapi.kakao.com/v2/local/search/address.json"
     headers = {"Authorization": f"KakaoAK {kakao_key}"}
@@ -69,25 +68,36 @@ def get_codes_from_kakao(address):
         if resp.status_code == 200:
             docs = resp.json().get('documents')
             if docs:
-                lat = float(docs[0]['y'])
-                lon = float(docs[0]['x'])
+                # 좌표 및 기본 행정정보
+                lat, lon = float(docs[0]['y']), float(docs[0]['x'])
                 b_code = docs[0]['address']['b_code']
-                sigungu_cd = b_code[:5]
-                bjdong_cd = b_code[5:]
+                h_code = docs[0]['address']['h_code'] # 행정동 코드 추가
+                
+                # 상세 주소 분해
+                region_1 = docs[0]['address']['region_1depth_name'] # 도/시 (예: 경기도)
+                region_2 = docs[0]['address']['region_2depth_name'] # 시/군/구 (예: 김포시)
+                region_3 = docs[0]['address']['region_3depth_name'] # 읍면동 (예: 통진읍)
+                
+                sigungu, bjdong = b_code[:5], b_code[5:]
                 main_no = docs[0]['address']['main_address_no']
                 sub_no = docs[0]['address']['sub_address_no']
                 bun = main_no.zfill(4)
                 ji = sub_no.zfill(4) if sub_no else "0000"
-                return sigungu_cd, bjdong_cd, bun, ji, (lat, lon), "Success"
-            else:
-                return None, None, None, None, None, "주소 미확인"
-        else:
-            return None, None, None, None, None, f"Kakao Error {resp.status_code}"
-    except Exception as e:
-        return None, None, None, None, None, str(e)
+                
+                # 지역 정보 패키징
+                loc_info = {
+                    "si": region_1,
+                    "gu": region_2,
+                    "dong": region_3
+                }
+                
+                return sigungu, bjdong, bun, ji, (lat, lon), loc_info, "Success"
+            return None, None, None, None, None, None, "주소 미확인"
+        return None, None, None, None, None, None, f"Error {resp.status_code}"
+    except Exception as e: return None, None, None, None, None, None, str(e)
 
 # --------------------------------------------------------------------------------
-# [Engine 2] Gov Data Connector (Enhanced Error Handling)
+# [Engine 2] Gov Data Connector (Building)
 # --------------------------------------------------------------------------------
 class RealDataConnector:
     def __init__(self, service_key):
@@ -97,18 +107,10 @@ class RealDataConnector:
     def get_building_info(self, sigungu_cd, bjdong_cd, bun, ji):
         if not self.service_key: return {"status": "error", "msg": "API Key Missing"}
         
-        # requests 라이브러리는 serviceKey를 자동으로 인코딩하므로, 
-        # 사용자가 이미 인코딩된 키(%)를 넣었다면 디코딩 처리 필요
         key_to_use = requests.utils.unquote(self.service_key)
-
         params = {
-            "serviceKey": key_to_use, 
-            "sigunguCd": sigungu_cd,
-            "bjdongCd": bjdong_cd,
-            "bun": bun,
-            "ji": ji,
-            "numOfRows": 1,
-            "pageNo": 1
+            "serviceKey": key_to_use, "sigunguCd": sigungu_cd, "bjdongCd": bjdong_cd,
+            "bun": bun, "ji": ji, "numOfRows": 1, "pageNo": 1
         }
         try:
             response = requests.get(self.base_url, params=params, timeout=10)
@@ -125,139 +127,115 @@ class RealDataConnector:
                             "구조": item.findtext("strctCdNm") or "-",
                             "위반여부": "위반" if item.findtext("otherConst") else "정상"
                         }
-                    else: 
-                        # 정상 응답이지만 데이터가 없는 경우 (나대지 등)
-                        return {"status": "nodata", "msg": "건물 정보 없음 (토지 상태)"}
-                except: return {"status": "error", "msg": "데이터 파싱 오류"}
-            
-            # 500 에러 발생 시 처리 (키 문제 or 데이터 없음)
-            elif response.status_code == 500:
-                return {"status": "nodata", "msg": "데이터 미존재 (나대지 가능성)"}
-            else: 
-                return {"status": "error", "msg": f"서버 오류 {response.status_code}"}
+                    return {"status": "nodata", "msg": "토지 상태 (건물 없음)"}
+                except: return {"status": "error", "msg": "XML Parsing Error"}
+            elif response.status_code == 500: return {"status": "nodata", "msg": "데이터 미존재"}
+            else: return {"status": "error", "msg": f"Server Error {response.status_code}"}
         except Exception as e: return {"status": "error", "msg": str(e)}
 
 # --------------------------------------------------------------------------------
-# [Engine 3] PDF Generator
+# [Engine 3] AI Legal & Land Analyst (The Unicorn Core)
 # --------------------------------------------------------------------------------
-def generate_final_pdf(address, context):
-    buffer = io.BytesIO()
-    c = canvas.Canvas(buffer, pagesize=A4)
-    width, height = A4
-    font_name = 'Helvetica'
-    if os.path.exists("NanumGothic.ttf"): 
-        pdfmetrics.registerFont(TTFont('NanumGothic', "NanumGothic.ttf"))
-        font_name = 'NanumGothic'
+def get_comprehensive_analysis(address, loc_info, building_data):
+    if not api_key: return "Google API 키가 설정되지 않았습니다."
     
-    c.setFont(font_name, 24)
-    c.drawCentredString(width/2, height-40*mm, "Jisang AI 부동산 분석 보고서")
-    c.line(20*mm, height-45*mm, width-20*mm, height-45*mm)
-
-    c.setFont(font_name, 12)
-    y_pos = height - 70*mm
-    c.drawString(25*mm, y_pos, f"주소: {address}")
-    c.drawString(25*mm, y_pos-10*mm, f"일시: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    model = genai.GenerativeModel('gemini-pro')
     
-    y_pos -= 30*mm
-    c.setFont(font_name, 16)
-    
-    # 토지 상태일 경우 리포트 내용 변경
-    if context.get('status') == 'nodata':
-        c.drawString(25*mm, y_pos, "[토지 분석 결과]")
-        c.setFont(font_name, 12)
-        c.drawString(30*mm, y_pos-15*mm, "• 현재 해당 지번에는 건축물대장이 존재하지 않습니다.")
-        c.drawString(30*mm, y_pos-25*mm, "• 나대지(빈 땅)이거나, 미등기 건물일 가능성이 있습니다.")
+    # 건물 정보가 있는지 여부에 따라 맥락 설정
+    building_context = ""
+    if building_data['status'] == 'success':
+        building_context = f"현재 건물 있음. 용도: {building_data['주용도']}, 연면적: {building_data['연면적']}m2."
     else:
-        c.drawString(25*mm, y_pos, "[건축물 데이터 요약]")
-        c.setFont(font_name, 12)
-        y_pos -= 15*mm
-        lines = [
-            f"• 용도: {context.get('주용도', '-')}",
-            f"• 위반: {context.get('위반여부', '-')}",
-            f"• 면적: {context.get('연면적', '-')} m2",
-            f"• 구조: {context.get('구조', '-')}"
-        ]
-        for line in lines:
-            c.drawString(30*mm, y_pos, line)
-            y_pos -= 10*mm
+        building_context = "현재 건물 없음(나대지 상태). 신축 개발 관점에서 분석 필요."
 
-    c.showPage()
-    c.save()
-    buffer.seek(0)
-    return buffer
+    # 프롬프트: 법률 및 조례 데이터베이스 역할 수행
+    prompt = f"""
+    당신은 대한민국 최고의 '부동산 공법 전문가'이자 'AI 도시계획가'입니다.
+    대상 주소: {address} ({loc_info['si']} {loc_info['gu']} {loc_info['dong']})
+    상태: {building_context}
+
+    아래의 [필수 분석 항목]을 해당 지자체({loc_info['gu']})의 최신 **도시계획조례** 및 **건축조례**에 기반하여 정밀 분석하고,
+    마크다운(Markdown) 표와 리스트 형식으로 깔끔하게 보고해 주세요.
+
+    [필수 분석 항목]
+    1. **기본 토지 정보 추정**:
+       - 예상 용도지역 (예: 계획관리지역, 제2종일반주거지역 등 - 주소지 특성에 맞춰 추론)
+       - 예상 공시지가 수준 (주변 시세 기반 추정치)
+       
+    2. **법적 규제 분석 ({loc_info['gu']} 조례 기준)**:
+       - **건폐율(BCR)**: 법적 상한 및 조례 상한 (%)
+       - **용적률(FAR)**: 법적 상한 및 조례 상한 (%)
+       - **지구단위계획**: 해당 여부 및 특이사항 가능성
+       - **규제 사항**: 군사시설보호구역, 비행안전구역, 개발행위허가 제한 여부 등 확인
+
+    3. **건축 가능성 (Allowable Uses)**:
+       - 허용 용도: (예: 단독주택, 제1/2종 근린생활시설, 공장, 창고 등)
+       - 불허 용도: (해당 용도지역에서 건축 불가능한 시설)
+       - **주차장 조례**: 부설주차장 설치 기준 (예: 134m2당 1대 등)
+
+    4. **최적 개발 솔루션 (Solution)**:
+       - 해당 입지에서 가장 수익성이 높은 개발 방식 제안 (3줄 요약)
+       - 투자 주의사항 (Risk Check)
+
+    *답변은 전문가처럼 명확한 수치와 법적 근거를 들어 작성하세요.*
+    """
+    
+    try:
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        return f"AI 정밀 분석 중 오류 발생: {str(e)}"
 
 # --------------------------------------------------------------------------------
 # [UI] Dashboard
 # --------------------------------------------------------------------------------
-st.set_page_config(page_title="Jisang AI Universe", page_icon="🏗️", layout="wide")
+st.set_page_config(page_title="Jisang AI Universe", page_icon="🦄", layout="wide")
+
+# CSS Styling
+st.markdown("""
+<style>
+    .metric-card {background-color: #f0f2f6; padding: 20px; border-radius: 10px; margin-bottom: 10px;}
+    .info-box {background-color: #e8f4f8; padding: 15px; border-radius: 5px; border-left: 5px solid #00a8cc;}
+    .warning-box {background-color: #fff3cd; padding: 15px; border-radius: 5px; border-left: 5px solid #ffc107;}
+</style>
+""", unsafe_allow_html=True)
 
 with st.sidebar:
-    st.title("🏗️ Jisang AI")
+    st.title("🦄 지상 AI")
+    st.caption("부동산 종합 솔루션 (Unicorn Edt.)")
     st.markdown("---")
     addr_input = st.text_input("주소 입력", "경기도 김포시 통진읍 도사리 163-1")
-    if st.button("🚀 분석 실행", type="primary", use_container_width=True):
+    if st.button("🚀 종합 정밀 분석 실행", type="primary", use_container_width=True):
         st.session_state['run'] = True
         st.session_state['addr'] = addr_input
+    
+    st.markdown("---")
+    st.info("💡 **Tip:** 토지이용계획, 건축법, 조례, 사업성 분석을 한 번에 수행합니다.")
 
-st.title("지상 AI 부동산 분석 시스템")
+st.title("지상 AI 부동산 종합 분석 시스템")
 
 if st.session_state.get('run'):
     target = st.session_state['addr']
-    st.subheader(f"📍 분석 대상: {target}")
     
-    # [수정] 지도 우선 표시 로직
-    with st.status("데이터 분석 중...", expanded=True) as status:
-        st.write("1. 카카오 위성 좌표 수신 중...")
-        sigungu, bjdong, bun, ji, coords, msg = get_codes_from_kakao(target)
+    with st.status("🔍 유니버스 데이터 파이프라인 가동...", expanded=True) as status:
+        st.write("1. 🛰️ 위성/행정 데이터 수집 (Kakao API)...")
+        sigungu, bjdong, bun, ji, coords, loc_info, msg = get_codes_from_kakao(target)
         
         if sigungu:
-            # ✅ 지도부터 그리기 (Map First)
-            if coords:
-                st.write("✅ 위치 확인 완료")
-                st.map(pd.DataFrame({'lat': [coords[0]], 'lon': [coords[1]]}), zoom=17, use_container_width=True)
+            # 1. Map Display
+            st.write("2. 📍 위치 기반 GIS 분석...")
+            col_map, col_info = st.columns([2, 1])
+            with col_map:
+                if coords:
+                    st.map(pd.DataFrame({'lat': [coords[0]], 'lon': [coords[1]]}), zoom=16, use_container_width=True)
             
-            st.write("2. 건축물대장 데이터 조회 중...")
+            # 2. Building Data
+            st.write("3. 🏢 건축물대장 및 소유권 분석 (Gov24)...")
             connector = RealDataConnector(data_go_key)
             real_data = connector.get_building_info(sigungu, bjdong, bun, ji)
             
-            # 결과 처리
-            if real_data['status'] == 'success':
-                status.update(label="건축물 분석 완료", state="complete", expanded=False)
-                
-                st.divider()
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("주용도", real_data['주용도'])
-                c2.metric("위반여부", real_data['위반여부'], "주의" if real_data['위반여부']=="위반" else "정상", delta_color="inverse")
-                c3.metric("연면적", f"{real_data['연면적']}㎡")
-                c4.metric("사용승인", real_data['사용승인일'])
-                
-                if real_data['위반여부'] == "위반":
-                    st.error("🚨 위반건축물입니다. 이행강제금 리스크를 확인하세요.")
-                else:
-                    st.success("✅ 건축물대장상 깨끗한 건물입니다.")
-
-            # [수정] 데이터가 없거나(토지), 에러가 나도 유연하게 처리
-            elif real_data['status'] == 'nodata':
-                status.update(label="토지 분석 모드", state="complete", expanded=False)
-                st.info("ℹ️ **건축물대장이 없습니다.** (현재 나대지이거나 미등기 상태)")
-                st.caption("💡 팁: 건물 정보가 없다면 토지이용계획(LURIS) 확인이 필요합니다.")
-                
-            else:
-                status.update(label="정부 서버 응답 지연", state="error")
-                st.warning(f"건물 데이터 조회 불가: {real_data['msg']}")
-                st.caption("💡 공공데이터포털 키 설정을 확인하거나, 잠시 후 다시 시도하세요.")
-
-            # 보고서 다운로드 (데이터 없어도 가능하게)
-            st.divider()
-            st.download_button(
-                label="📄 현황 보고서 다운로드 (PDF)",
-                data=generate_final_pdf(target, real_data if real_data else {'status': 'error'}),
-                file_name="Report.pdf",
-                mime="application/pdf",
-                type="primary",
-                use_container_width=True
-            )
-
-        else:
-            status.update(label="주소 오류", state="error")
-            st.error(f"주소를 찾을 수 없습니다: {msg}")
+            # 3. AI Analysis
+            st.write("4. ⚖️ 법률/조례/사업성 정밀 분석 (Gemini Pro)...")
+            ai_report = get_comprehensive_analysis(target, loc_info, real_data)
+            
+            status.update(label="분석 완료! (All Systems Go
