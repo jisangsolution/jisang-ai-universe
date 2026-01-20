@@ -238,4 +238,44 @@ if st.session_state.get('run'):
             st.write("4. ⚖️ 법률/조례/사업성 정밀 분석 (Gemini Pro)...")
             ai_report = get_comprehensive_analysis(target, loc_info, real_data)
             
-            status.update(label="분석 완료! (All Systems Go
+            status.update(label="분석 완료! (All Systems Go)", state="complete", expanded=False)
+            
+            # --- 결과 화면 ---
+            st.divider()
+            st.header(f"📍 분석 보고서: {target}")
+            
+            # Tab 구성
+            tab1, tab2, tab3 = st.tabs(["🏗️ 건물/현황", "📜 토지/규제 분석", "💡 개발 솔루션"])
+            
+            with tab1:
+                st.subheader("기본 건축물 현황")
+                c1, c2, c3, c4 = st.columns(4)
+                if real_data['status'] == 'success':
+                    c1.metric("주용도", real_data['주용도'])
+                    c2.metric("위반여부", real_data['위반여부'], delta="주의" if real_data['위반여부']=="위반" else "Clean", delta_color="inverse")
+                    c3.metric("연면적", f"{real_data['연면적']}㎡")
+                    c4.metric("사용승인", real_data['사용승인일'])
+                    if real_data['위반여부'] == "위반":
+                        st.error("🚨 본 건물은 위반건축물입니다. 이행강제금 부과 대상이며 대출이 제한될 수 있습니다.")
+                else:
+                    st.info("📌 **나대지 (건물 없음)**")
+                    st.markdown("현재 건축물대장이 존재하지 않는 토지입니다. 신축 개발 관점에서 접근하십시오.")
+
+            with tab2:
+                st.subheader("⚖️ 토지이용계획 및 법적 규제")
+                st.caption("※ 해당 지자체 조례 및 건축법 기반 AI 분석 결과입니다.")
+                st.markdown(ai_report.split("4. **최적 개발 솔루션")[0]) # 규제 부분만 잘라서 표시
+
+            with tab3:
+                st.subheader("💡 최적 개발 솔루션 (Feasibility Study)")
+                try:
+                    solution_part = ai_report.split("4. **최적 개발 솔루션")[1] # 솔루션 부분만 표시
+                    st.markdown(f"#### 4. 최적 개발 솔루션 {solution_part}")
+                except:
+                    st.markdown(ai_report) # 분리 실패 시 전체 표시
+                
+                st.warning("본 분석 결과는 법적 효력이 없으며, 실제 인허가 진행 시 관할 지자체 확인이 필수입니다.")
+
+        else:
+            status.update(label="주소 오류", state="error")
+            st.error(f"주소를 찾을 수 없습니다: {msg}")
