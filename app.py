@@ -162,5 +162,77 @@ def generate_final_pdf(address, context):
     c.drawString(25*mm, y, "[핵심 데이터]")
     c.setFont(font_name, 12)
     
+    # [수정된 부분] 괄호 오류 완벽 수정
     data_lines = [
-        f"1. 건물 용도: {context.
+        f"1. 건물 용도: {context.get('주용도', '-')}",
+        f"2. 위반 여부: {context.get('위반여부', '-')}",
+        f"3. 연 면 적: {context.get('연면적', '-')} ㎡",
+        f"4. 구    조: {context.get('구조', '-')}"
+    ]
+    
+    y -= 15*mm
+    for line in data_lines:
+        c.drawString(30*mm, y, line)
+        y -= 10*mm
+
+    # Disclaimer
+    c.setStrokeColorRGB(0.8, 0.8, 0.8)
+    c.line(20*mm, 30*mm, width-20*mm, 30*mm)
+    c.setFont(font_name, 8)
+    c.setFillColorRGB(0.5, 0.5, 0.5)
+    c.drawCentredString(width/2, 25*mm, "본 보고서는 AI 분석 시뮬레이션 결과이며 법적 효력이 없습니다.")
+    
+    c.showPage()
+    c.save()
+    buffer.seek(0)
+    return buffer
+
+# --------------------------------------------------------------------------------
+# [UI] Main Dashboard
+# --------------------------------------------------------------------------------
+st.set_page_config(page_title="Jisang AI Universe", page_icon="🏢", layout="wide")
+
+with st.sidebar:
+    st.title("🏢 Jisang AI")
+    st.markdown("---")
+    addr_input = st.text_input("주소를 입력하세요 (도로명/지번)", "경기도 김포시 통진읍 도사리 163-1")
+    
+    if st.button("🚀 AI 정밀 분석 실행", type="primary", use_container_width=True):
+        st.session_state['run_analysis'] = True
+        st.session_state['target_addr'] = addr_input
+    
+    st.markdown("---")
+    st.caption("Powered by Google x Gov24 x Kakao")
+
+# Main Logic
+st.title("지상 AI 부동산 분석 시스템")
+
+if 'run_analysis' in st.session_state and st.session_state['run_analysis']:
+    target = st.session_state['target_addr']
+    st.subheader(f"📍 분석 대상: {target}")
+    
+    # 1. Kakao Geocoding
+    with st.status("📡 위성 및 행정 데이터 수집 중...", expanded=True) as status:
+        st.write("1단계: 카카오 위성 좌표 및 행정코드 추출 중...")
+        sigungu, bjdong, bun, ji, coords, msg = get_codes_from_kakao(target)
+        
+        if sigungu:
+            st.write("✅ 주소 확인 완료! (좌표 획득)")
+            
+            # Map Display
+            if coords:
+                df_map = pd.DataFrame({'lat': [coords[0]], 'lon': [coords[1]]})
+                st.map(df_map, zoom=15, use_container_width=True)
+
+            st.write("2단계: 정부24 건축물대장 서버 접속 중...")
+            connector = RealDataConnector(data_go_key)
+            real_data = connector.get_building_info(sigungu, bjdong, bun, ji)
+            
+            if real_data['status'] == 'success':
+                st.write("✅ 건축물대장 데이터 확보 성공!")
+                status.update(label="분석 완료!", state="complete", expanded=False)
+            else:
+                st.write(f"⚠️ 대장 정보 없음: {real_data['msg']}")
+                status.update(label="데이터 확인 필요", state="error")
+        else:
+            st.error(f"❌ 주
