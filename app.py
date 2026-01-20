@@ -61,24 +61,21 @@ def get_pnu_and_coords(address):
     except Exception as e: return None, None, None, str(e)
 
 # --------------------------------------------------------------------------------
-# [Engine 2] 데이터 융합 (오타 및 파싱 에러 수정 완료)
+# [Engine 2] 데이터 융합 (무결성 강화)
 # --------------------------------------------------------------------------------
 class MasterFactEngine:
     @staticmethod
     def get_land_basic(pnu):
-        # 국토부 토지대장
         target_key = land_go_key or data_go_key
         if not target_key: return {"status": "NO_KEY", "msg": "키 없음"}
         
         url = "http://apis.data.go.kr/1613000/LandInfoService/getLandInfo"
-        # 순수 키와 인코딩된 키 모두 시도 (방탄 로직)
         keys = [target_key, unquote(target_key)]
         
         for key in keys:
             try:
                 res = requests.get(url, params={"serviceKey": key, "pnu": pnu, "numOfRows": 1}, timeout=5)
                 if res.status_code == 200:
-                    # XML 파싱 시도
                     try:
                         root = ET.fromstring(res.content)
                         item = root.find('.//item')
@@ -89,15 +86,13 @@ class MasterFactEngine:
                                 "면적": item.findtext("lndpclAr"),
                                 "공시지가": item.findtext("pblntfPclnd")
                             }
-                    except ET.ParseError:
-                        continue # XML이 아니면 다음 키 시도
+                    except: continue
             except: pass
             
         return {"status": "EMPTY", "msg": "데이터 로딩 중"}
 
     @staticmethod
     def get_land_features(pnu):
-        # V-World 토지특성 (이전 코드의 오타 수정됨)
         if not vworld_key: return {"도로": "-", "형상": "-"}
         
         url = "http://api.vworld.kr/req/data"
@@ -119,7 +114,6 @@ class MasterFactEngine:
                 data = res.json()
                 if data.get('response', {}).get('status') == 'OK':
                     feat = data['response']['result']['featureCollection']['features'][0]['properties']
-                    # [수정 완료] 따옴표와 괄호가 정확히 닫힘
                     return {
                         "도로": feat.get('road_side_nm', '정보없음'),
                         "형상": feat.get('lad_shpe_nm', '정보없음'),
@@ -157,7 +151,7 @@ st.set_page_config(page_title="Jisang AI Unicorn", layout="wide", page_icon="�
 
 with st.sidebar:
     st.header("🦄 지상 AI")
-    st.caption("Ver 10.4 (Final Fix)")
+    st.caption("Ver 10.5 (Final Integrity)")
     addr = st.text_input("주소 입력", "경기도 김포시 통진읍 도사리 163-1")
     if st.button("🚀 유니콘 분석 실행", type="primary"):
         st.session_state['run'] = True
@@ -182,9 +176,33 @@ if st.session_state.get('run'):
             status.update(label="분석 완료!", state="complete", expanded=False)
             
             st.divider()
-            c1, c2 = st.columns([1, 1.5])
+            
+            # [수정 완료] 들여쓰기(Indentation) 완벽 보정
+            c1, c2 = st.columns([1, 1.5]) 
             
             with c1:
                 st.subheader("📊 팩트 체크 (Money Base)")
                 with st.container(border=True):
-                    # 국토부
+                    # 국토부 데이터 로직 (들여쓰기 중요)
+                    if land_res.get('status') == 'SUCCESS':
+                        st.success("✅ 국토부 데이터 확보")
+                        st.write(f"• **면적**: {float(land_res['면적']):,.1f}㎡")
+                        st.write(f"• **공시지가**: {int(land_res['공시지가']):,}원")
+                    else:
+                        st.warning(f"⚠️ 국토부 연결 지연: {land_res.get('msg')}")
+                    
+                    st.markdown("---")
+                    
+                    # V-World 데이터 로직
+                    if feat_res['도로'] != "확인중":
+                        st.success("✅ 도로/형상 정보 확보")
+                        st.write(f"• **도로조건**: {feat_res['도로']}")
+                        st.write(f"• **토지형상**: {feat_res['형상']}")
+                    else:
+                        st.info("ℹ️ 토지특성 분석 중...")
+
+            with c2:
+                st.subheader("💡 유니콘 투자 전략")
+                st.info(ai_text)
+        else:
+            st.error(f"주소 오류: {msg}")
