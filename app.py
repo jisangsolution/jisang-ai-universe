@@ -253,4 +253,13 @@ if st.session_state.get('run'):
                     <b>✅ V-World 특성 확보</b><br>
                     • 도로조건: {feat_result['도로']}<br>
                     • 토지형상: {feat_result['형상']}
-                    </div>""", unsafe_allow_html
+                    </div>""", unsafe_allow_html=True)
+                else:
+                    st.info("ℹ️ 토지 특성 정보 연결 중...")
+
+            with col2:
+                st.subheader("💡 유니콘 투자 전략")
+                st.info(ai_report_text)
+                
+        else:
+            st.error(f"주소를 찾을 수 없습니다: {addr_info}")
