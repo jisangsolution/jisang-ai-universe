@@ -154,3 +154,21 @@ def generate_legal_insight(addr, region, law_data):
     try:
         model = genai.GenerativeModel('gemini-pro')
     except:
+        return "AI 모델 로드 실패. 잠시 후 다시 시도해주세요."
+    
+    prompt = f"""
+    당신은 대한민국 최고의 부동산 법률 분석가입니다.
+    
+    [분석 대상]
+    주소: {addr}
+    관할 지역: {region}
+    
+    [참고 조례 데이터]
+    {law_data}
+    
+    위 데이터를 바탕으로 투자자를 위한 핵심 전략 리포트를 작성하세요.
+    (조례 데이터가 부족할 경우, 해당 지역의 통상적인 용도지역 규제를 추론하여 답변하세요.)
+    
+    1. 📜 **적용 조례 확인**: '{region} 도시계획조례' 기준 분석.
+    2. 🏗️ **건축 제한 분석**: 건폐율/용적률 상한선 및 건축 가능한 용도 추천.
+    3. 💰 **수
