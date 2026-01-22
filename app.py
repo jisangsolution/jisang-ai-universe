@@ -151,4 +151,98 @@ def generate_legal_insight(addr, region, law_data):
     
     # [수정] 가장 안정적인 모델로 고정
     try:
-        model
+        model = genai.GenerativeModel('gemini-pro')
+    except:
+        return "AI 모델 로드 실패"
+    
+    # [수정] 문자열 닫힘 확인 완료
+    prompt = f"""
+    당신은 대한민국 최고의 부동산 법률 분석가입니다.
+    
+    [분석 대상]
+    주소: {addr}
+    관할 지역: {region}
+    
+    [참고 조례 데이터]
+    {law_data}
+    
+    위 데이터를 바탕으로 투자자를 위한 핵심 전략 리포트를 작성하세요.
+    (조례 데이터가 부족할 경우, 해당 지역의 통상적인 용도지역 규제를 추론하여 답변하세요.)
+    
+    1. 📜 **적용 조례 확인**: '{region} 도시계획조례' 기준 분석.
+    2. 🏗️ **건축 제한 분석**: 건폐율/용적률 상한선 및 건축 가능한 용도 추천.
+    3. 💰 **수익화 전략**: 이 땅의 가치를 극대화할 수 있는 개발 테마 (카페, 창고, 주택 등).
+    """
+    
+    try:
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        return f"AI 분석 중 오류 발생: {str(e)}"
+
+# --------------------------------------------------------------------------------
+# [UI] 지상 AI 유니콘 대시보드
+# --------------------------------------------------------------------------------
+st.set_page_config(page_title="Jisang AI Legal", layout="wide", page_icon="⚖️")
+
+st.markdown("""
+<style>
+    .law-box { background-color: #f8f9fa; padding: 15px; border-radius: 5px; border: 1px solid #ddd; font-size: 0.9rem; }
+    .success-box { padding:10px; background-color:#d4edda; color:#155724; border-radius:5px; margin-top: 10px; }
+</style>
+""", unsafe_allow_html=True)
+
+with st.sidebar:
+    st.title("⚖️ Jisang AI")
+    st.caption("Ver 14.3 (Final Stable)")
+    addr_input = st.text_input("주소 입력", "경기도 김포시 통진읍 도사리 163-1")
+    
+    if st.button("🚀 법률 분석 실행", type="primary"):
+        st.session_state['run'] = True
+        st.session_state['addr'] = addr_input
+
+st.title("지상 AI: 부동산 법률 통합 분석")
+
+# 실행 로직 (문법 오류 수정 완료)
+if st.session_state.get('run'):
+    target = st.session_state['addr']
+    
+    with st.status("🔍 데이터를 분석하고 있습니다...", expanded=True) as status:
+        
+        # 1. 위치 및 지역 파악
+        region, coords, addr_info = DataEngine.get_location(target)
+        
+        if region:
+            # 2. 법령 검색
+            law_result = LegalEngine.get_ordinance(region, "도시계획조례")
+            
+            # 3. AI 분석
+            ai_report = generate_legal_insight(target, region, law_result)
+            
+            status.update(label="분석 완료!", state="complete", expanded=False)
+            
+            # --- 결과 표시 ---
+            col1, col2 = st.columns([1, 1.5])
+            
+            with col1:
+                st.subheader("📍 위치 확인")
+                if coords:
+                    map_df = pd.DataFrame({'lat': [coords[0]], 'lon': [coords[1]]})
+                    st.map(map_df, zoom=15)
+                else:
+                    st.warning("위치 정보를 지도에 표시할 수 없습니다.")
+                
+                st.markdown("---")
+                st.subheader("📜 관련 조례 데이터")
+                st.markdown(f"<div class='law-box'>{law_result}</div>", unsafe_allow_html=True)
+
+            with col2:
+                st.subheader("💡 AI 법률 해석 리포트")
+                if "오류" in ai_report:
+                    st.error(ai_report)
+                else:
+                    st.info(ai_report)
+                    st.markdown('<div class="success-box">Tip: "더 스마트 법인" 설립 시 취득세 절세 가능성을 검토하세요.</div>', unsafe_allow_html=True)
+
+        else:
+            st.error("주소를 찾을 수 없습니다. (카카오 API 키를 확인해주세요)")
