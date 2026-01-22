@@ -43,16 +43,19 @@ if "streamlit" not in sys.modules:
 import google.generativeai as genai
 
 # --------------------------------------------------------------------------------
-# [Step 1] API 키 로드 (Secrets 관리)
+# [Step 1] API 키 로드 (Secrets 관리 - 방어 코드 적용)
 # --------------------------------------------------------------------------------
 def get_clean_key(key_name):
     """Secrets에서 키를 안전하게 가져오는 함수"""
-    raw_key = st.secrets.get(key_name, "")
-    if not raw_key:
+    try:
+        raw_key = st.secrets.get(key_name, "")
+        if not raw_key:
+            return None
+        if "%" in raw_key:
+            return unquote(raw_key)
+        return raw_key
+    except:
         return None
-    if "%" in raw_key:
-        return unquote(raw_key)
-    return raw_key
 
 # 각종 API 키 로드
 api_key = get_clean_key("GOOGLE_API_KEY")
@@ -60,9 +63,12 @@ kakao_key = st.secrets.get("KAKAO_API_KEY", "")
 law_id = st.secrets.get("LAW_USER_ID", "")
 law_key = st.secrets.get("LAW_API_KEY", "")
 
-# Google AI 설정
+# Google AI 설정 (예외 처리 추가)
 if api_key:
-    genai.configure(api_key=api_key)
+    try:
+        genai.configure(api_key=api_key)
+    except Exception as e:
+        st.error(f"API 설정 오류: {e}")
 
 # --------------------------------------------------------------------------------
 # [Engine 1] 법령 파싱 엔진 (국가법령정보센터)
@@ -72,9 +78,9 @@ class LegalEngine:
     def get_ordinance(region, keyword):
         """지역명과 키워드로 조례를 검색"""
         
-        # 키가 없으면 AI 추론 모드로 전환
+        # 키가 없으면 AI 추론 모드로 전환 메시지 반환
         if not law_id or not law_key:
-            return "🔒 법령 API 키가 설정되지 않았습니다. (AI 추론 모드로 진행)"
+            return "🔒 법령 API 키 미설정 (AI 추론 모드 가동)"
             
         url = "http://www.law.go.kr/DRF/lawSearch.do"
         params = {
@@ -90,7 +96,7 @@ class LegalEngine:
                 root = ET.fromstring(response.content)
                 law_list = []
                 
-                # XML 파싱 (에러 방지를 위한 예외처리 포함)
+                # XML 파싱 (에러 방지를 위한 개별 try-except)
                 for child in root.findall(".//law"):
                     try:
                         name = child.find("법령명한글").text
@@ -144,18 +150,19 @@ class DataEngine:
         return None, None, "위치 검색 실패"
 
 # --------------------------------------------------------------------------------
-# [Engine 3] AI 융합 분석 엔진 (모델 호환성 개선)
+# [Engine 3] AI 융합 분석 엔진 (모델 호환성 개선 - gemini-pro)
 # --------------------------------------------------------------------------------
 def generate_legal_insight(addr, region, law_data):
     if not api_key:
         return "⚠️ Google AI API 키가 설정되지 않았습니다."
     
-    # [중요] 호환성이 가장 좋은 'gemini-pro' 모델 사용
+    # [중요] 404 에러 방지를 위해 가장 안정적인 'gemini-pro' 모델 사용
     try:
         model = genai.GenerativeModel('gemini-pro')
     except:
-        return "AI 모델 로드 실패. 잠시 후 다시 시도해주세요."
+        return "AI 모델 로드 실패. 라이브러리 버전을 확인하세요."
     
+    # [중요] 문자열 닫힘 확인 (Triple Quote)
     prompt = f"""
     당신은 대한민국 최고의 부동산 법률 분석가입니다.
     
@@ -171,4 +178,75 @@ def generate_legal_insight(addr, region, law_data):
     
     1. 📜 **적용 조례 확인**: '{region} 도시계획조례' 기준 분석.
     2. 🏗️ **건축 제한 분석**: 건폐율/용적률 상한선 및 건축 가능한 용도 추천.
-    3. 💰 **수
+    3. 💰 **수익화 전략**: 이 땅의 가치를 극대화할 수 있는 개발 테마 (카페, 창고, 주택 등).
+    """
+    
+    try:
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        return f"AI 분석 중 오류 발생: {str(e)}"
+
+# --------------------------------------------------------------------------------
+# [UI] 지상 AI 유니콘 대시보드
+# --------------------------------------------------------------------------------
+st.set_page_config(page_title="Jisang AI Legal", layout="wide", page_icon="⚖️")
+
+# 스타일링
+st.markdown("""
+<style>
+    .law-box { background-color: #f8f9fa; padding: 15px; border-radius: 5px; border: 1px solid #ddd; font-size: 0.9rem; }
+    .stButton>button { width: 100%; }
+    .success-box { padding:10px; background-color:#d4edda; color:#155724; border-radius:5px; }
+</style>
+""", unsafe_allow_html=True)
+
+# 사이드바
+with st.sidebar:
+    st.title("⚖️ Jisang AI")
+    st.caption("Ver 14.3 (Stable Engine)")
+    st.divider()
+    addr_input = st.text_input("주소 입력", "경기도 김포시 통진읍 도사리 163-1")
+    
+    if st.button("🚀 법률 분석 실행", type="primary"):
+        st.session_state['run'] = True
+        st.session_state['addr'] = addr_input
+
+# 메인 화면
+st.title("지상 AI: 부동산 법률 통합 분석")
+
+# [중요] if st. 구문 오류 수정 (session_state 확인)
+if st.session_state.get('run'):
+    target = st.session_state['addr']
+    
+    with st.status("🔍 데이터를 분석하고 있습니다...", expanded=True) as status:
+        
+        # 1. 위치 및 지역 파악
+        region, coords, addr_info = DataEngine.get_location(target)
+        
+        if region:
+            # 2. 법령 검색 (실패해도 멈추지 않음)
+            law_result = LegalEngine.get_ordinance(region, "도시계획조례")
+            
+            # 3. AI 분석
+            ai_report = generate_legal_insight(target, region, law_result)
+            
+            status.update(label="분석 완료!", state="complete", expanded=False)
+            
+            # --- 결과 표시 (레이아웃 분리) ---
+            col1, col2 = st.columns([1, 1.5])
+            
+            with col1:
+                st.subheader("📍 위치 확인")
+                if coords:
+                    map_df = pd.DataFrame({'lat': [coords[0]], 'lon': [coords[1]]})
+                    st.map(map_df, zoom=15)
+                else:
+                    st.warning("위치 정보를 지도에 표시할 수 없습니다.")
+                
+                st.markdown("---")
+                st.subheader("📜 관련 조례 데이터")
+                st.markdown(f"<div class='law-box'>{law_result}</div>", unsafe_allow_html=True)
+
+            with col2:
+                st.subheader("💡 AI 법률 해석
